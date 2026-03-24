@@ -1,0 +1,66 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String     @id // Clerk User ID
+  role      String     @default("affiliate") // "merchant" or "affiliate"
+  balance   Float      @default(0.0) // Wallet balance
+  campaigns Campaign[]
+  links     Link[]
+  merchantCampaigns Campaign[] @relation("MerchantCampaigns")
+  affiliateLinks    Link[]     @relation("AffiliateLinks")
+}
+
+model Campaign {
+  id         String   @id @default(cuid())
+  merchantId String
+  type       String   // "PPC" or "PPS"
+  targetUrl  String
+  reward     Float    // e.g., 0.20 for PPC, 10.0 for PPS (%)
+  isActive   Boolean  @default(true)
+  merchant   User     @relation("MerchantCampaigns", fields: [merchantId], references: [id])
+  links      Link[]
+  user       User?    @relation(fields: [userId], references: [id])
+  userId     String?
+}
+
+model Link {
+  id          String       @id @default(cuid()) // Unique hash for tracking
+  affiliateId String
+  campaignId  String
+  affiliate   User         @relation("AffiliateLinks", fields: [affiliateId], references: [id])
+  campaign    Campaign     @relation(fields: [campaignId], references: [id])
+  clicks      Click[]
+  conversions Conversion[]
+  user        User?        @relation(fields: [userId], references: [id])
+  userId      String?
+}
+
+model Click {
+  id        String   @id @default(cuid())
+  linkId    String
+  ipAddress String
+  isValid   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  link      Link     @relation(fields: [linkId], references: [id])
+}
+
+model Conversion {
+  id        String   @id @default(cuid())
+  linkId    String
+  orderId   String   @unique
+  amount    Float
+  createdAt DateTime @default(now())
+  link      Link     @relation(fields: [linkId], references: [id])
+}
