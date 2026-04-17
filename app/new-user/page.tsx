@@ -1,31 +1,32 @@
 import { currentUser } from "@clerk/nextjs/server";
-import { prisma } from "../../utils/db";
+import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 
-export default async function connect() {
+export default async function NewUserPage() {
     const user = await currentUser();
 
-    if (!user || !user.username) {
+    if (!user) {
         return redirect("/sign-in");
     }
 
-    const match = await prisma.user.upsert({
+    const email = user.emailAddresses[0]?.emailAddress ?? null;
+    const name = user.username ?? user.firstName ?? null;
+
+    await prisma.user.upsert({
         where: {
-            ClerkID: user.id as string,
+            id: user.id,
         },
         update: {
-            email: user.emailAddresses[0].emailAddress,
-            name: user.username,
-            ClerkID: user.id,
+            email: email,
+            name: name,
         },
         create: {
-            ClerkID: user.id,
-            email: user.emailAddresses[0].emailAddress,
-            role: "student",
-            name: user.username,
+            id: user.id,
+            email: email,
+            role: "",
+            name: name,
         },
     });
 
-
-    redirect("/register");
+    redirect("/onboarding");
 }

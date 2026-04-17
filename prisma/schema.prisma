@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,26 +11,32 @@ datasource db {
 }
 
 model User {
-  id        String     @id // Clerk User ID
-  role      String     @default("affiliate") // "merchant" or "affiliate"
-  balance   Float      @default(0.0) // Wallet balance
-  campaigns Campaign[]
-  links     Link[]
-  merchantCampaigns Campaign[] @relation("MerchantCampaigns")
-  affiliateLinks    Link[]     @relation("AffiliateLinks")
+  id                   String       @id // Clerk User ID
+  email                String?
+  name                 String?
+  role                 String       @default("") // "merchant", "affiliate", or "admin" — set during onboarding
+  balance              Float        @default(0.0)
+  merchantCampaigns    Campaign[]   @relation("MerchantCampaigns")
+  affiliateLinks       Link[]       @relation("AffiliateLinks")
+  sentTransactions     Transaction[] @relation("SentTransactions")
+  receivedTransactions Transaction[] @relation("ReceivedTransactions")
 }
 
 model Campaign {
-  id         String   @id @default(cuid())
-  merchantId String
-  type       String   // "PPC" or "PPS"
-  targetUrl  String
-  reward     Float    // e.g., 0.20 for PPC, 10.0 for PPS (%)
-  isActive   Boolean  @default(true)
-  merchant   User     @relation("MerchantCampaigns", fields: [merchantId], references: [id])
-  links      Link[]
-  user       User?    @relation(fields: [userId], references: [id])
-  userId     String?
+  id               String   @id @default(cuid())
+  merchantId       String
+  type             String   // "PPC" or "PPS"
+  targetUrl        String
+  reward           Float    // e.g., 0.20 for PPC ($ per click), 10.0 for PPS (% commission)
+  allowedCountries String   @default("") // Comma-separated ISO country codes, empty = all countries
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  merchant         User     @relation("MerchantCampaigns", fields: [merchantId], references: [id])
+  links            Link[]
+  clicks           Click[]
+
+  @@index([merchantId])
+  @@index([isActive])
 }
 
 model Link {
@@ -43,24 +47,62 @@ model Link {
   campaign    Campaign     @relation(fields: [campaignId], references: [id])
   clicks      Click[]
   conversions Conversion[]
-  user        User?        @relation(fields: [userId], references: [id])
-  userId      String?
+
+  @@index([affiliateId])
+  @@index([campaignId])
 }
 
 model Click {
-  id        String   @id @default(cuid())
-  linkId    String
-  ipAddress String
-  isValid   Boolean  @default(true)
-  createdAt DateTime @default(now())
-  link      Link     @relation(fields: [linkId], references: [id])
+  id         String   @id @default(cuid())
+  linkId     String
+  campaignId String
+  ipAddress  String
+  userAgent  String   @default("")
+  country    String?
+  isValid    Boolean  @default(true)
+  isFlagged  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  link       Link     @relation(fields: [linkId], references: [id])
+  campaign   Campaign @relation(fields: [campaignId], references: [id])
+
+  @@index([ipAddress, campaignId, createdAt])
+  @@index([linkId])
+  @@index([isFlagged])
 }
 
 model Conversion {
+  id         String   @id @default(cuid())
+  linkId     String
+  orderId    String   @unique
+  amount     Float
+  isFlagged  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  link       Link     @relation(fields: [linkId], references: [id])
+
+  @@index([isFlagged])
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  fromUserId  String
+  toUserId    String
+  amount      Float
+  type        String   // "PPC_CLICK", "PPS_CONVERSION", "DEPOSIT"
+  referenceId String   // Click ID, Conversion ID, or deposit reference
+  description String?
+  createdAt   DateTime @default(now())
+  fromUser    User     @relation("SentTransactions", fields: [fromUserId], references: [id])
+  toUser      User     @relation("ReceivedTransactions", fields: [toUserId], references: [id])
+
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model IPBlacklist {
   id        String   @id @default(cuid())
-  linkId    String
-  orderId   String   @unique
-  amount    Float
+  ipAddress String   @unique
+  reason    String
   createdAt DateTime @default(now())
-  link      Link     @relation(fields: [linkId], references: [id])
 }
