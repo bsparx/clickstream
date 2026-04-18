@@ -28,6 +28,7 @@ model Campaign {
   type             String   // "PPC" or "PPS"
   targetUrl        String
   reward           Float    // e.g., 0.20 for PPC ($ per click), 10.0 for PPS (% commission)
+  discount         Float    @default(0) // Discount % for end user (e.g., 5 = 5% off)
   allowedCountries String   @default("") // Comma-separated ISO country codes, empty = all countries
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())

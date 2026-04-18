@@ -427,6 +427,13 @@ export default async function AffiliatePage() {
                                                         : `${campaign.reward}%/sale`}
                                                 </span>
                                             </div>
+                                            {campaign.discount > 0 && (
+                                                <div className="mt-1">
+                                                    <Badge variant="secondary" className="bg-amber-100 text-amber-700 border-amber-200">
+                                                        {campaign.discount}% user discount
+                                                    </Badge>
+                                                </div>
+                                            )}
                                             <CardTitle
                                                 className="mt-2 text-xl truncate"
                                                 title={campaign.targetUrl}

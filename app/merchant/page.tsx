@@ -144,6 +144,7 @@ export default async function MerchantPage() {
         const targetUrl = formData.get("targetUrl") as string;
         const type = formData.get("type") as string;
         const reward = parseFloat(formData.get("reward") as string);
+        const discount = parseFloat(formData.get("discount") as string) || 0;
         const allowedCountries = (formData.get("allowedCountries") as string) || "";
 
         if (!targetUrl || !["PPC", "PPS"].includes(type) || isNaN(reward)) return;
@@ -157,6 +158,7 @@ export default async function MerchantPage() {
                 targetUrl,
                 type,
                 reward,
+                discount,
                 allowedCountries: allowedCountries
                     .split(",")
                     .map((c: string) => c.trim().toUpperCase())
@@ -427,14 +429,20 @@ export default async function MerchantPage() {
                             >
                                 <div className="space-y-2 flex-grow w-full">
                                     <label className="text-sm font-semibold text-zinc-700">
-                                        Target Destination URL
+                                        Product / Store
                                     </label>
-                                    <Input
+                                    <select
                                         name="targetUrl"
-                                        placeholder="https://yourstore.com/product"
-                                        className="h-11"
+                                        className="flex h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
                                         required
-                                    />
+                                    >
+                                        <option value="https://hci-project-beta.vercel.app/">
+                                            HCI Project Store — hci-project-beta.vercel.app
+                                        </option>
+                                        <option value="http://localhost:3001/">
+                                            HCI Project Store — localhost:3001
+                                        </option>
+                                    </select>
                                 </div>
                                 <div className="space-y-2 w-full lg:w-48">
                                     <label className="text-sm font-semibold text-zinc-700">
@@ -461,6 +469,20 @@ export default async function MerchantPage() {
                                         min="0.01"
                                         className="h-11"
                                         required
+                                    />
+                                </div>
+                                <div className="space-y-2 w-full lg:w-48">
+                                    <label className="text-sm font-semibold text-zinc-700">
+                                        Discount % (for end user)
+                                    </label>
+                                    <Input
+                                        type="number"
+                                        name="discount"
+                                        placeholder="e.g. 5"
+                                        step="0.01"
+                                        min="0"
+                                        max="100"
+                                        className="h-11"
                                     />
                                 </div>
                                 <div className="space-y-2 w-full lg:w-56">
@@ -494,9 +516,10 @@ export default async function MerchantPage() {
                             <Table>
                                 <TableHeader className="bg-zinc-50/50">
                                     <TableRow>
-                                        <TableHead className="w-[30%]">Target URL</TableHead>
+                                        <TableHead className="w-[25%]">Target URL</TableHead>
                                         <TableHead>Type</TableHead>
                                         <TableHead>Reward</TableHead>
+                                        <TableHead>Discount</TableHead>
                                         <TableHead>Geo-Target</TableHead>
                                         <TableHead className="text-right pr-6">Status</TableHead>
                                     </TableRow>
@@ -522,6 +545,15 @@ export default async function MerchantPage() {
                                                 {campaign.type === "PPC"
                                                     ? `$${campaign.reward.toFixed(2)}`
                                                     : `${campaign.reward}%`}
+                                            </TableCell>
+                                            <TableCell>
+                                                {campaign.discount > 0 ? (
+                                                    <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
+                                                        {campaign.discount}% off
+                                                    </Badge>
+                                                ) : (
+                                                    <span className="text-xs text-zinc-400">—</span>
+                                                )}
                                             </TableCell>
                                             <TableCell>
                                                 {campaign.allowedCountries ? (
@@ -559,7 +591,7 @@ export default async function MerchantPage() {
                                     {merchant.merchantCampaigns.length === 0 && (
                                         <TableRow>
                                             <TableCell
-                                                colSpan={5}
+                                                colSpan={6}
                                                 className="text-center py-12 text-zinc-500 bg-zinc-50/30"
                                             >
                                                 <div className="flex flex-col items-center gap-2">

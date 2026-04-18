@@ -191,18 +191,35 @@ export async function GET(
 
   // ── Set Tracking Cookie for PPS Attribution ─────────────────
   const targetUrl = new URL(campaign.targetUrl);
+  // Pass ref and discount as URL params so cross-domain merchant sites can
+  // read them and set their own cookies (cookies set here won't be readable
+  // on a different domain).
   targetUrl.searchParams.set("ref", linkId);
+  if (campaign.discount > 0) {
+    targetUrl.searchParams.set("discount", String(campaign.discount));
+  }
 
   const response = NextResponse.redirect(targetUrl.toString());
 
-  // Store only the linkId in cookie — the conversion script reads this
+  // Also set cookies for same-domain scenarios (e.g. if merchant site
+  // and ClickStream share a domain or for local development)
   response.cookies.set("cs_ref", linkId, {
     maxAge: 30 * 24 * 60 * 60, // 30 days
-    httpOnly: false, // Allow merchant sites to read this cookie
+    httpOnly: false,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
   });
+
+  if (campaign.discount > 0) {
+    response.cookies.set("cs_discount", String(campaign.discount), {
+      maxAge: 30 * 24 * 60 * 60,
+      httpOnly: false,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+    });
+  }
 
   return response;
 }

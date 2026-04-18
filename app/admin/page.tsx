@@ -377,6 +377,7 @@ export default async function AdminPage() {
                                         <TableHead>Type</TableHead>
                                         <TableHead>Target URL</TableHead>
                                         <TableHead>Reward</TableHead>
+                                        <TableHead>Discount</TableHead>
                                         <TableHead>Geo</TableHead>
                                         <TableHead className="text-right pr-6">Status</TableHead>
                                     </TableRow>
@@ -400,6 +401,15 @@ export default async function AdminPage() {
                                                 {c.type === "PPC"
                                                     ? `$${c.reward.toFixed(2)}`
                                                     : `${c.reward}%`}
+                                            </TableCell>
+                                            <TableCell>
+                                                {c.discount > 0 ? (
+                                                    <Badge variant="secondary" className="bg-amber-100 text-amber-700">
+                                                        {c.discount}%
+                                                    </Badge>
+                                                ) : (
+                                                    <span className="text-xs text-zinc-400">—</span>
+                                                )}
                                             </TableCell>
                                             <TableCell>
                                                 {c.allowedCountries ? (
