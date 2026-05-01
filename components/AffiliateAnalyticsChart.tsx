@@ -19,7 +19,7 @@ interface ChartDataPoint {
     label?: string;
 }
 
-interface AffiliateAnalyticsChartProps {
+export interface AffiliateAnalyticsChartProps {
     data: ChartDataPoint[];
 }
 
@@ -31,8 +31,8 @@ function CustomTooltip({ active, payload, label }: {
     if (!active || !payload || !payload.length) return null;
 
     return (
-        <div className="bg-white border border-zinc-200 rounded-lg p-3 shadow-md text-sm">
-            <p className="font-medium text-zinc-700 mb-1">{label}</p>
+        <div className="bg-[#232428] border border-white/10 rounded-lg p-3 shadow-xl text-sm">
+            <p className="font-medium text-white mb-1">{label}</p>
             {payload.map((entry, index) => {
                 const nameMap: Record<string, string> = {
                     clicks: "Valid Clicks",
@@ -45,10 +45,10 @@ function CustomTooltip({ active, payload, label }: {
                             className="w-3 h-3 rounded-sm"
                             style={{ backgroundColor: entry.color }}
                         />
-                        <span className="text-zinc-600">
+                        <span className="text-[#949ba4]">
                             {nameMap[entry.dataKey] || entry.dataKey}:
                         </span>
-                        <span className="font-semibold text-zinc-900">
+                        <span className="font-semibold text-white">
                             {entry.dataKey === "earnings"
                                 ? `$${entry.value.toFixed(2)}`
                                 : entry.value}
@@ -63,7 +63,7 @@ function CustomTooltip({ active, payload, label }: {
 export function AffiliateAnalyticsChart({ data }: AffiliateAnalyticsChartProps) {
     if (data.length === 0) {
         return (
-            <div className="text-center py-8 text-muted-foreground">
+            <div className="text-center py-8 text-[#949ba4]">
                 <p>No data available yet.</p>
             </div>
         );
@@ -88,8 +88,8 @@ export function AffiliateAnalyticsChart({ data }: AffiliateAnalyticsChartProps) 
                 >
                     <defs>
                         <linearGradient id="colorClicks" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                            <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                            <stop offset="5%" stopColor="#5865F2" stopOpacity={0.3} />
+                            <stop offset="95%" stopColor="#5865F2" stopOpacity={0} />
                         </linearGradient>
                         <linearGradient
                             id="colorConversions"
@@ -98,33 +98,33 @@ export function AffiliateAnalyticsChart({ data }: AffiliateAnalyticsChartProps) 
                             x2="0"
                             y2="1"
                         >
-                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                            <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                            <stop offset="5%" stopColor="#57F287" stopOpacity={0.3} />
+                            <stop offset="95%" stopColor="#57F287" stopOpacity={0} />
                         </linearGradient>
                         <linearGradient id="colorEarnings" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3} />
-                            <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0} />
+                            <stop offset="5%" stopColor="#bd00ff" stopOpacity={0.3} />
+                            <stop offset="95%" stopColor="#bd00ff" stopOpacity={0} />
                         </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e4e4e7" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
                     <XAxis
                         dataKey="label"
-                        tick={{ fontSize: 12, fill: "#71717a" }}
+                        tick={{ fontSize: 12, fill: "#949ba4" }}
                         tickLine={false}
-                        axisLine={{ stroke: "#e4e4e7" }}
+                        axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
                     />
                     <YAxis
                         yAxisId="left"
-                        tick={{ fontSize: 12, fill: "#71717a" }}
+                        tick={{ fontSize: 12, fill: "#949ba4" }}
                         tickLine={false}
-                        axisLine={{ stroke: "#e4e4e7" }}
+                        axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
                     />
                     <YAxis
                         yAxisId="right"
                         orientation="right"
-                        tick={{ fontSize: 12, fill: "#71717a" }}
+                        tick={{ fontSize: 12, fill: "#949ba4" }}
                         tickLine={false}
-                        axisLine={{ stroke: "#e4e4e7" }}
+                        axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
                         tickFormatter={(value: number) => `$${value}`}
                     />
                     <Tooltip content={<CustomTooltip />} />
@@ -135,14 +135,18 @@ export function AffiliateAnalyticsChart({ data }: AffiliateAnalyticsChartProps) 
                                 conversions: "Conversions",
                                 earnings: "Earnings ($)",
                             };
-                            return nameMap[value] || value;
+                            return (
+                                <span style={{ color: "#949ba4" }}>
+                                    {nameMap[value] || value}
+                                </span>
+                            );
                         }}
                     />
                     <Area
                         yAxisId="left"
                         type="monotone"
                         dataKey="clicks"
-                        stroke="#3b82f6"
+                        stroke="#5865F2"
                         fillOpacity={1}
                         fill="url(#colorClicks)"
                         strokeWidth={2}
@@ -151,7 +155,7 @@ export function AffiliateAnalyticsChart({ data }: AffiliateAnalyticsChartProps) 
                         yAxisId="left"
                         type="monotone"
                         dataKey="conversions"
-                        stroke="#10b981"
+                        stroke="#57F287"
                         fillOpacity={1}
                         fill="url(#colorConversions)"
                         strokeWidth={2}
@@ -160,7 +164,7 @@ export function AffiliateAnalyticsChart({ data }: AffiliateAnalyticsChartProps) 
                         yAxisId="right"
                         type="monotone"
                         dataKey="earnings"
-                        stroke="#8b5cf6"
+                        stroke="#bd00ff"
                         fillOpacity={1}
                         fill="url(#colorEarnings)"
                         strokeWidth={2}

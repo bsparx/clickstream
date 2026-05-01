@@ -56,47 +56,110 @@ export default async function MerchantPage() {
 
     const merchant = await prisma.user.findUnique({
         where: { id: userId },
-        include: {
-            merchantCampaigns: {
-                include: {
-                    links: {
-                        include: {
-                            clicks: true,
-                            conversions: true,
-                        },
-                    },
-                },
-            },
-        },
     });
 
     if (!merchant || merchant.role !== "merchant") {
         redirect("/onboarding");
     }
 
-    // Calculate campaign statistics
-    let totalClicks = 0;
-    let totalValidClicks = 0;
-    let totalConversions = 0;
-    let totalSpent = 0;
-
-    merchant.merchantCampaigns.forEach((campaign) => {
-        campaign.links.forEach((link) => {
-            totalClicks += link.clicks.length;
-            totalValidClicks += link.clicks.filter((c) => c.isValid).length;
-            totalConversions += link.conversions.length;
-
-            if (campaign.type === "PPC") {
-                totalSpent +=
-                    link.clicks.filter((c) => c.isValid).length * campaign.reward;
-            } else {
-                totalSpent += link.conversions.reduce(
-                    (sum, conv) => sum + conv.amount,
-                    0
-                );
-            }
-        });
+    // Fetch campaigns only (no heavy relation includes)
+    const merchantCampaigns = await prisma.campaign.findMany({
+        where: { merchantId: userId },
+        orderBy: { createdAt: "desc" },
+        take: 200,
     });
+
+    const campaignIds = merchantCampaigns.map((c) => c.id);
+
+    // Fetch all links for these campaigns
+    const campaignLinks = campaignIds.length > 0
+        ? await prisma.link.findMany({
+              where: { campaignId: { in: campaignIds } },
+              select: { id: true, campaignId: true },
+              take: 1000,
+          })
+        : [];
+
+    const linkIds = campaignLinks.map((l) => l.id);
+    const linkToCampaign = new Map(campaignLinks.map((l) => [l.id, l.campaignId]));
+
+    // Aggregate totals in a single batch
+    const [totalClicksAgg, totalValidClicksAgg, totalConversionsAgg] =
+        linkIds.length > 0
+            ? await Promise.all([
+                  prisma.click.count({ where: { linkId: { in: linkIds } } }),
+                  prisma.click.count({ where: { linkId: { in: linkIds }, isValid: true } }),
+                  prisma.conversion.count({ where: { linkId: { in: linkIds } } }),
+              ])
+            : [0, 0, 0];
+
+    // Grouped stats by linkId (2 queries total instead of N*2)
+    const [clicksGrouped, conversionsGrouped, conversionsSum] =
+        linkIds.length > 0
+            ? await Promise.all([
+                  prisma.click.groupBy({
+                      by: ["linkId"],
+                      where: { linkId: { in: linkIds }, isValid: true },
+                      _count: { id: true },
+                  }),
+                  prisma.conversion.groupBy({
+                      by: ["linkId"],
+                      where: { linkId: { in: linkIds } },
+                      _count: { id: true },
+                  }),
+                  prisma.conversion.aggregate({
+                      where: { linkId: { in: linkIds } },
+                      _sum: { amount: true },
+                  }),
+              ])
+            : [[], [], { _sum: { amount: 0 } }];
+
+    const clicksByLink = new Map(clicksGrouped.map((g) => [g.linkId, g._count.id]));
+    const conversionsByLink = new Map(conversionsGrouped.map((g) => [g.linkId, g._count.id]));
+
+    // Calculate total spent efficiently
+    let totalSpent = 0;
+    const campaignRewardMap = new Map(merchantCampaigns.map((c) => [c.id, c.reward]));
+    const campaignTypeMap = new Map(merchantCampaigns.map((c) => [c.id, c.type]));
+
+    // PPC: sum valid clicks per link * campaign reward
+    for (const [linkId, count] of clicksByLink) {
+        const cid = linkToCampaign.get(linkId);
+        if (cid && campaignTypeMap.get(cid) === "PPC") {
+            totalSpent += count * (campaignRewardMap.get(cid) || 0);
+        }
+    }
+
+    // PPS: add conversion sums
+    totalSpent += conversionsSum._sum.amount || 0;
+
+    // Per-campaign stats aggregated from link-level groupBy
+    const campaignStatsMap = new Map<
+        string,
+        { validClicks: number; conversions: number }
+    >();
+    for (const c of merchantCampaigns) {
+        campaignStatsMap.set(c.id, { validClicks: 0, conversions: 0 });
+    }
+    for (const [linkId, count] of clicksByLink) {
+        const cid = linkToCampaign.get(linkId);
+        if (cid) {
+            const s = campaignStatsMap.get(cid);
+            if (s) s.validClicks += count;
+        }
+    }
+    for (const [linkId, count] of conversionsByLink) {
+        const cid = linkToCampaign.get(linkId);
+        if (cid) {
+            const s = campaignStatsMap.get(cid);
+            if (s) s.conversions += count;
+        }
+    }
+
+    const maxClicks = Math.max(
+        ...Array.from(campaignStatsMap.values()).map((s) => s.validClicks),
+        1
+    );
 
     // Fetch transaction history
     const transactions = await prisma.transaction.findMany({
@@ -104,7 +167,7 @@ export default async function MerchantPage() {
             OR: [{ fromUserId: userId }, { toUserId: userId }],
         },
         orderBy: { createdAt: "desc" },
-        take: 50,
+        take: 100,
     });
 
     // ── Server Actions ──────────────────────────────────────────
@@ -123,7 +186,6 @@ export default async function MerchantPage() {
                 data: { balance: { increment: amount } },
             });
 
-            // Create deposit transaction ledger record
             await tx.transaction.create({
                 data: {
                     fromUserId: userId,
@@ -174,32 +236,32 @@ export default async function MerchantPage() {
     return (
         <div className="container mx-auto p-6 space-y-6">
             <div className="flex justify-between items-center">
-                <h1 className="text-3xl font-bold">Merchant Dashboard</h1>
+                <h1 className="text-3xl font-bold text-white">Merchant Dashboard</h1>
             </div>
 
             <Tabs defaultValue="overview" className="w-full">
-                <TabsList className="grid w-full max-w-2xl grid-cols-4 p-1 bg-muted/50 rounded-lg">
+                <TabsList className="grid w-full max-w-2xl grid-cols-4 p-1 bg-[#232428] rounded-lg border border-white/5">
                     <TabsTrigger
                         value="overview"
-                        className="rounded-md data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                        className="rounded-md data-[state=active]:bg-[#5865F2] data-[state=active]:text-white text-[#949ba4]"
                     >
                         Overview & Wallet
                     </TabsTrigger>
                     <TabsTrigger
                         value="campaigns"
-                        className="rounded-md data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                        className="rounded-md data-[state=active]:bg-[#5865F2] data-[state=active]:text-white text-[#949ba4]"
                     >
                         Campaigns
                     </TabsTrigger>
                     <TabsTrigger
                         value="tracking"
-                        className="rounded-md data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                        className="rounded-md data-[state=active]:bg-[#5865F2] data-[state=active]:text-white text-[#949ba4]"
                     >
                         Tracking Scripts
                     </TabsTrigger>
                     <TabsTrigger
                         value="transactions"
-                        className="rounded-md data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                        className="rounded-md data-[state=active]:bg-[#5865F2] data-[state=active]:text-white text-[#949ba4]"
                     >
                         Transactions
                     </TabsTrigger>
@@ -208,89 +270,89 @@ export default async function MerchantPage() {
                 {/* ── Overview & Wallet ──────────────────────────────── */}
                 <TabsContent value="overview" className="space-y-6 pt-6">
                     <div className="grid md:grid-cols-4 gap-6">
-                        <Card className="border-zinc-200 shadow-sm transition-all hover:shadow-md">
-                            <CardHeader className="flex flex-row items-center justify-between pb-2 bg-zinc-50/50 rounded-t-xl">
-                                <CardTitle className="text-sm font-semibold text-zinc-600 uppercase tracking-wider">
+                        <Card className="bg-[#232428] border-white/5 hover:border-[#57F287]/20 transition-all">
+                            <CardHeader className="flex flex-row items-center justify-between pb-2">
+                                <CardTitle className="text-sm font-semibold text-[#949ba4] uppercase tracking-wider">
                                     Available Balance
                                 </CardTitle>
-                                <div className="p-2 bg-emerald-100 rounded-full">
-                                    <Wallet className="h-5 w-5 text-emerald-600" />
+                                <div className="p-2 bg-[#57F287]/10 rounded-full border border-[#57F287]/20">
+                                    <Wallet className="h-5 w-5 text-[#57F287]" />
                                 </div>
                             </CardHeader>
                             <CardContent className="pt-6">
-                                <div className="text-4xl font-bold tracking-tight text-zinc-900">
+                                <div className="text-4xl font-bold tracking-tight text-white">
                                     ${merchant.balance.toFixed(2)}
                                 </div>
-                                <p className="text-sm text-zinc-500 mt-2">Current funds</p>
+                                <p className="text-sm text-[#949ba4] mt-2">Current funds</p>
                             </CardContent>
                         </Card>
 
-                        <Card className="border-zinc-200 shadow-sm transition-all hover:shadow-md">
-                            <CardHeader className="flex flex-row items-center justify-between pb-2 bg-zinc-50/50 rounded-t-xl">
-                                <CardTitle className="text-sm font-semibold text-zinc-600 uppercase tracking-wider">
+                        <Card className="bg-[#232428] border-white/5 hover:border-red-500/20 transition-all">
+                            <CardHeader className="flex flex-row items-center justify-between pb-2">
+                                <CardTitle className="text-sm font-semibold text-[#949ba4] uppercase tracking-wider">
                                     Total Spent
                                 </CardTitle>
-                                <div className="p-2 bg-red-100 rounded-full">
-                                    <DollarSign className="h-5 w-5 text-red-600" />
+                                <div className="p-2 bg-red-500/10 rounded-full border border-red-500/20">
+                                    <DollarSign className="h-5 w-5 text-red-400" />
                                 </div>
                             </CardHeader>
                             <CardContent className="pt-6">
-                                <div className="text-4xl font-bold tracking-tight text-zinc-900">
+                                <div className="text-4xl font-bold tracking-tight text-white">
                                     ${totalSpent.toFixed(2)}
                                 </div>
-                                <p className="text-sm text-zinc-500 mt-2">
+                                <p className="text-sm text-[#949ba4] mt-2">
                                     Across all campaigns
                                 </p>
                             </CardContent>
                         </Card>
 
-                        <Card className="border-zinc-200 shadow-sm transition-all hover:shadow-md">
-                            <CardHeader className="flex flex-row items-center justify-between pb-2 bg-zinc-50/50 rounded-t-xl">
-                                <CardTitle className="text-sm font-semibold text-zinc-600 uppercase tracking-wider">
+                        <Card className="bg-[#232428] border-white/5 hover:border-[#5865F2]/20 transition-all">
+                            <CardHeader className="flex flex-row items-center justify-between pb-2">
+                                <CardTitle className="text-sm font-semibold text-[#949ba4] uppercase tracking-wider">
                                     Valid Clicks
                                 </CardTitle>
-                                <div className="p-2 bg-blue-100 rounded-full">
-                                    <MousePointerClick className="h-5 w-5 text-blue-600" />
+                                <div className="p-2 bg-[#5865F2]/20 rounded-full border border-[#5865F2]/20">
+                                    <MousePointerClick className="h-5 w-5 text-[#5865F2]" />
                                 </div>
                             </CardHeader>
                             <CardContent className="pt-6">
-                                <div className="text-4xl font-bold tracking-tight text-zinc-900">
-                                    {totalValidClicks}
+                                <div className="text-4xl font-bold tracking-tight text-white">
+                                    {totalValidClicksAgg}
                                 </div>
-                                <p className="text-sm text-zinc-500 mt-2">
-                                    Out of {totalClicks} total
+                                <p className="text-sm text-[#949ba4] mt-2">
+                                    Out of {totalClicksAgg} total
                                 </p>
                             </CardContent>
                         </Card>
 
-                        <Card className="border-zinc-200 shadow-sm transition-all hover:shadow-md">
-                            <CardHeader className="flex flex-row items-center justify-between pb-2 bg-zinc-50/50 rounded-t-xl">
-                                <CardTitle className="text-sm font-semibold text-zinc-600 uppercase tracking-wider">
+                        <Card className="bg-[#232428] border-white/5 hover:border-[#bd00ff]/20 transition-all">
+                            <CardHeader className="flex flex-row items-center justify-between pb-2">
+                                <CardTitle className="text-sm font-semibold text-[#949ba4] uppercase tracking-wider">
                                     Conversions
                                 </CardTitle>
-                                <div className="p-2 bg-purple-100 rounded-full">
-                                    <ShoppingCart className="h-5 w-5 text-purple-600" />
+                                <div className="p-2 bg-[#bd00ff]/10 rounded-full border border-[#bd00ff]/20">
+                                    <ShoppingCart className="h-5 w-5 text-[#bd00ff]" />
                                 </div>
                             </CardHeader>
                             <CardContent className="pt-6">
-                                <div className="text-4xl font-bold tracking-tight text-zinc-900">
-                                    {totalConversions}
+                                <div className="text-4xl font-bold tracking-tight text-white">
+                                    {totalConversionsAgg}
                                 </div>
-                                <p className="text-sm text-zinc-500 mt-2">PPS sales tracked</p>
+                                <p className="text-sm text-[#949ba4] mt-2">PPS sales tracked</p>
                             </CardContent>
                         </Card>
                     </div>
 
                     <div className="grid md:grid-cols-2 gap-8">
-                        <Card className="border-zinc-200 shadow-sm">
-                            <CardHeader className="bg-zinc-50/50 rounded-t-xl border-b border-zinc-100">
-                                <CardTitle className="text-lg">Deposit Funds</CardTitle>
+                        <Card className="bg-[#232428] border-white/5">
+                            <CardHeader className="border-b border-white/5">
+                                <CardTitle className="text-lg text-white">Deposit Funds</CardTitle>
                             </CardHeader>
                             <CardContent className="pt-6">
                                 <form action={depositFunds} className="flex flex-col gap-4">
                                     <div className="flex gap-4 items-center">
                                         <div className="relative flex-1">
-                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500">
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#949ba4]">
                                                 $
                                             </span>
                                             <Input
@@ -299,75 +361,58 @@ export default async function MerchantPage() {
                                                 placeholder="0.00"
                                                 step="0.01"
                                                 min="1"
-                                                className="pl-8 text-lg"
+                                                className="pl-8 text-lg bg-[#1a1b1e] border-white/10 text-white placeholder:text-[#949ba4]/50 focus-visible:ring-[#5865F2]"
                                                 required
                                             />
                                         </div>
-                                        <Button type="submit" size="lg" className="px-8">
+                                        <Button type="submit" size="lg" className="px-8 bg-gradient-to-r from-[#5865F2] to-[#7289DA] hover:opacity-90 text-white border-0 glow-blurple">
                                             Deposit
                                         </Button>
                                     </div>
-                                    <p className="text-xs text-zinc-500 text-center">
+                                    <p className="text-xs text-[#949ba4] text-center">
                                         Mock payment system. Funds are instantly credited.
                                     </p>
                                 </form>
                             </CardContent>
                         </Card>
 
-                        <Card className="border-zinc-200 shadow-sm">
-                            <CardHeader className="bg-zinc-50/50 border-b border-zinc-100">
-                                <CardTitle className="flex items-center gap-2">
-                                    <TrendingUp className="h-5 w-5 text-zinc-500" /> Campaign
+                        <Card className="bg-[#232428] border-white/5">
+                            <CardHeader className="border-b border-white/5">
+                                <CardTitle className="flex items-center gap-2 text-white">
+                                    <TrendingUp className="h-5 w-5 text-[#5865F2]" /> Campaign
                                     Performance
                                 </CardTitle>
-                                <CardDescription>
+                                <CardDescription className="text-[#949ba4]">
                                     Click and conversion metrics by campaign
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="pt-6">
-                                {merchant.merchantCampaigns.length > 0 ? (
+                                {merchantCampaigns.length > 0 ? (
                                     <div className="space-y-4">
-                                        {merchant.merchantCampaigns.map((campaign) => {
-                                            const campaignClicks = campaign.links.reduce(
-                                                (sum, l) =>
-                                                    sum + l.clicks.filter((c) => c.isValid).length,
-                                                0
-                                            );
-                                            const campaignConversions = campaign.links.reduce(
-                                                (sum, l) => sum + l.conversions.length,
-                                                0
-                                            );
-                                            const maxClicks = Math.max(
-                                                ...merchant.merchantCampaigns.map((c) =>
-                                                    c.links.reduce(
-                                                        (sum, l) =>
-                                                            sum +
-                                                            l.clicks.filter((cl) => cl.isValid).length,
-                                                        0
-                                                    )
-                                                ),
-                                                1
-                                            );
+                                        {merchantCampaigns.map((campaign) => {
+                                            const stats = campaignStatsMap.get(campaign.id);
+                                            const campaignClicks = stats?.validClicks || 0;
+                                            const campaignConversions = stats?.conversions || 0;
 
                                             return (
                                                 <div key={campaign.id} className="space-y-2">
                                                     <div className="flex items-center justify-between text-sm">
                                                         <div className="flex items-center gap-2 truncate">
-                                                            <span className="font-medium truncate">
+                                                            <span className="font-medium truncate text-white">
                                                                 {safeGetHostname(campaign.targetUrl)}
                                                             </span>
-                                                            <Badge variant="outline" className="text-xs">
+                                                            <Badge variant="outline" className="text-xs border-white/10 text-[#949ba4]">
                                                                 {campaign.type}
                                                             </Badge>
                                                         </div>
-                                                        <div className="flex items-center gap-4 text-muted-foreground">
+                                                        <div className="flex items-center gap-4 text-[#949ba4]">
                                                             <span>{campaignClicks} clicks</span>
                                                             <span>{campaignConversions} conv.</span>
                                                         </div>
                                                     </div>
                                                     <div className="flex gap-2 h-6">
                                                         <div
-                                                            className="bg-blue-500 rounded-sm transition-all"
+                                                            className="bg-[#5865F2] rounded-sm transition-all"
                                                             style={{
                                                                 width: `${(campaignClicks / maxClicks) * 100}%`,
                                                                 minWidth: campaignClicks > 0 ? "4px" : "0",
@@ -375,7 +420,7 @@ export default async function MerchantPage() {
                                                             title={`${campaignClicks} valid clicks`}
                                                         />
                                                         <div
-                                                            className="bg-emerald-500 rounded-sm transition-all"
+                                                            className="bg-[#57F287] rounded-sm transition-all"
                                                             style={{
                                                                 width: `${(campaignConversions / maxClicks) * 100}%`,
                                                                 minWidth: campaignConversions > 0
@@ -388,20 +433,20 @@ export default async function MerchantPage() {
                                                 </div>
                                             );
                                         })}
-                                        <div className="flex items-center gap-6 pt-4 border-t text-xs text-muted-foreground">
+                                        <div className="flex items-center gap-6 pt-4 border-t border-white/5 text-xs text-[#949ba4]">
                                             <div className="flex items-center gap-2">
-                                                <div className="w-3 h-3 bg-blue-500 rounded-sm" />
+                                                <div className="w-3 h-3 bg-[#5865F2] rounded-sm" />
                                                 <span>Valid Clicks</span>
                                             </div>
                                             <div className="flex items-center gap-2">
-                                                <div className="w-3 h-3 bg-emerald-500 rounded-sm" />
+                                                <div className="w-3 h-3 bg-[#57F287] rounded-sm" />
                                                 <span>Conversions</span>
                                             </div>
                                         </div>
                                     </div>
                                 ) : (
-                                    <div className="text-center py-8 text-muted-foreground">
-                                        <TrendingUp className="h-8 w-8 mx-auto mb-2 text-zinc-300" />
+                                    <div className="text-center py-8 text-[#949ba4]">
+                                        <TrendingUp className="h-8 w-8 mx-auto mb-2 text-[#949ba4]/30" />
                                         <p>
                                             No campaign data yet. Create a campaign to see performance
                                             metrics.
@@ -415,25 +460,25 @@ export default async function MerchantPage() {
 
                 {/* ── Campaigns ──────────────────────────────────────── */}
                 <TabsContent value="campaigns" className="space-y-8 pt-6">
-                    <Card className="border-dashed border-2 bg-zinc-50/30 shadow-none">
+                    <Card className="bg-[#232428]/50 border-dashed border-2 border-white/10">
                         <CardHeader>
-                            <CardTitle className="flex items-center gap-2 text-xl text-zinc-800">
-                                <PlusCircle className="h-6 w-6 text-indigo-500" /> Create New
+                            <CardTitle className="flex items-center gap-2 text-xl text-white">
+                                <PlusCircle className="h-6 w-6 text-[#5865F2]" /> Create New
                                 Campaign
                             </CardTitle>
                         </CardHeader>
                         <CardContent>
                             <form
                                 action={createCampaign}
-                                className="flex flex-col lg:flex-row gap-6 items-end bg-white p-6 rounded-xl border shadow-sm"
+                                className="flex flex-col lg:flex-row gap-6 items-end bg-[#232428] p-6 rounded-xl border border-white/5 shadow-lg"
                             >
                                 <div className="space-y-2 flex-grow w-full">
-                                    <label className="text-sm font-semibold text-zinc-700">
+                                    <label className="text-sm font-semibold text-[#f2f3f5]">
                                         Product / Store
                                     </label>
                                     <select
                                         name="targetUrl"
-                                        className="flex h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
+                                        className="flex h-11 w-full rounded-md border border-white/10 bg-[#1a1b1e] px-3 py-2 text-base text-white ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5865F2] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
                                         required
                                     >
                                         <option value="https://hci-project-beta.vercel.app/">
@@ -445,12 +490,12 @@ export default async function MerchantPage() {
                                     </select>
                                 </div>
                                 <div className="space-y-2 w-full lg:w-48">
-                                    <label className="text-sm font-semibold text-zinc-700">
+                                    <label className="text-sm font-semibold text-[#f2f3f5]">
                                         Campaign Type
                                     </label>
                                     <select
                                         name="type"
-                                        className="flex h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
+                                        className="flex h-11 w-full rounded-md border border-white/10 bg-[#1a1b1e] px-3 py-2 text-base text-white ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5865F2] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
                                         required
                                     >
                                         <option value="PPC">PPC (Cost Per Click)</option>
@@ -458,7 +503,7 @@ export default async function MerchantPage() {
                                     </select>
                                 </div>
                                 <div className="space-y-2 w-full lg:w-48">
-                                    <label className="text-sm font-semibold text-zinc-700">
+                                    <label className="text-sm font-semibold text-[#f2f3f5]">
                                         Reward Rate ($/%)
                                     </label>
                                     <Input
@@ -467,12 +512,12 @@ export default async function MerchantPage() {
                                         placeholder="e.g. 0.20 or 10"
                                         step="0.01"
                                         min="0.01"
-                                        className="h-11"
+                                        className="h-11 bg-[#1a1b1e] border-white/10 text-white placeholder:text-[#949ba4]/50 focus-visible:ring-[#5865F2]"
                                         required
                                     />
                                 </div>
                                 <div className="space-y-2 w-full lg:w-48">
-                                    <label className="text-sm font-semibold text-zinc-700">
+                                    <label className="text-sm font-semibold text-[#f2f3f5]">
                                         Discount % (for end user)
                                     </label>
                                     <Input
@@ -482,23 +527,23 @@ export default async function MerchantPage() {
                                         step="0.01"
                                         min="0"
                                         max="100"
-                                        className="h-11"
+                                        className="h-11 bg-[#1a1b1e] border-white/10 text-white placeholder:text-[#949ba4]/50 focus-visible:ring-[#5865F2]"
                                     />
                                 </div>
                                 <div className="space-y-2 w-full lg:w-56">
-                                    <label className="text-sm font-semibold text-zinc-700 flex items-center gap-1">
-                                        <Globe className="w-4 h-4" /> Geo-Target (optional)
+                                    <label className="text-sm font-semibold text-[#f2f3f5] flex items-center gap-1">
+                                        <Globe className="w-4 h-4 text-[#5865F2]" /> Geo-Target (optional)
                                     </label>
                                     <Input
                                         name="allowedCountries"
                                         placeholder="US, GB, PK (comma-separated)"
-                                        className="h-11"
+                                        className="h-11 bg-[#1a1b1e] border-white/10 text-white placeholder:text-[#949ba4]/50 focus-visible:ring-[#5865F2]"
                                     />
                                 </div>
                                 <Button
                                     type="submit"
                                     size="lg"
-                                    className="w-full lg:w-auto h-11 px-8 bg-zinc-900 text-white hover:bg-zinc-800"
+                                    className="w-full lg:w-auto h-11 px-8 bg-gradient-to-r from-[#5865F2] to-[#7289DA] hover:opacity-90 text-white border-0 glow-blurple"
                                 >
                                     Launch
                                 </Button>
@@ -506,53 +551,51 @@ export default async function MerchantPage() {
                         </CardContent>
                     </Card>
 
-                    <Card className="border-zinc-200 shadow-sm overflow-hidden">
-                        <CardHeader className="bg-zinc-50/50 border-b border-zinc-100">
-                            <CardTitle className="flex items-center gap-2">
-                                <Megaphone className="h-5 w-5 text-zinc-500" /> Active Campaigns
+                    <Card className="bg-[#232428] border-white/5 overflow-hidden">
+                        <CardHeader className="border-b border-white/5">
+                            <CardTitle className="flex items-center gap-2 text-white">
+                                <Megaphone className="h-5 w-5 text-[#5865F2]" /> Active Campaigns
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="p-0">
                             <Table>
-                                <TableHeader className="bg-zinc-50/50">
-                                    <TableRow>
-                                        <TableHead className="w-[25%]">Target URL</TableHead>
-                                        <TableHead>Type</TableHead>
-                                        <TableHead>Reward</TableHead>
-                                        <TableHead>Discount</TableHead>
-                                        <TableHead>Geo-Target</TableHead>
-                                        <TableHead className="text-right pr-6">Status</TableHead>
+                                <TableHeader>
+                                    <TableRow className="border-white/5 hover:bg-transparent">
+                                        <TableHead className="w-[25%] text-[#949ba4]">Target URL</TableHead>
+                                        <TableHead className="text-[#949ba4]">Type</TableHead>
+                                        <TableHead className="text-[#949ba4]">Reward</TableHead>
+                                        <TableHead className="text-[#949ba4]">Discount</TableHead>
+                                        <TableHead className="text-[#949ba4]">Geo-Target</TableHead>
+                                        <TableHead className="text-right pr-6 text-[#949ba4]">Status</TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
-                                    {merchant.merchantCampaigns.map((campaign) => (
+                                    {merchantCampaigns.map((campaign) => (
                                         <TableRow
                                             key={campaign.id}
-                                            className="hover:bg-zinc-50/50"
+                                            className="border-white/5 hover:bg-white/5"
                                         >
                                             <TableCell
-                                                className="font-medium text-zinc-700 max-w-xs truncate"
+                                                className="font-medium text-white max-w-xs truncate"
                                                 title={campaign.targetUrl}
                                             >
                                                 {campaign.targetUrl}
                                             </TableCell>
                                             <TableCell>
-                                                <Badge variant="outline" className="bg-white">
-                                                    {campaign.type}
-                                                </Badge>
+                                                <Badge variant="outline" className="bg-[#1a1b1e] border-white/10 text-[#949ba4]">{campaign.type}</Badge>
                                             </TableCell>
-                                            <TableCell className="font-semibold text-emerald-600">
+                                            <TableCell className="font-semibold text-[#57F287]">
                                                 {campaign.type === "PPC"
                                                     ? `$${campaign.reward.toFixed(2)}`
                                                     : `${campaign.reward}%`}
                                             </TableCell>
                                             <TableCell>
                                                 {campaign.discount > 0 ? (
-                                                    <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
+                                                    <Badge variant="outline" className="bg-[#FEE75C]/10 text-[#FEE75C] border-[#FEE75C]/20">
                                                         {campaign.discount}% off
                                                     </Badge>
                                                 ) : (
-                                                    <span className="text-xs text-zinc-400">—</span>
+                                                    <span className="text-xs text-[#949ba4]">—</span>
                                                 )}
                                             </TableCell>
                                             <TableCell>
@@ -564,14 +607,14 @@ export default async function MerchantPage() {
                                                                 <Badge
                                                                     key={code}
                                                                     variant="secondary"
-                                                                    className="text-xs"
+                                                                    className="text-xs bg-white/5 text-[#949ba4] border-white/10"
                                                                 >
                                                                     {code}
                                                                 </Badge>
                                                             ))}
                                                     </div>
                                                 ) : (
-                                                    <span className="text-xs text-zinc-400">All</span>
+                                                    <span className="text-xs text-[#949ba4]">All</span>
                                                 )}
                                             </TableCell>
                                             <TableCell className="text-right pr-6">
@@ -579,8 +622,8 @@ export default async function MerchantPage() {
                                                     variant={campaign.isActive ? "default" : "secondary"}
                                                     className={
                                                         campaign.isActive
-                                                            ? "bg-emerald-500 hover:bg-emerald-600"
-                                                            : ""
+                                                            ? "bg-[#57F287]/20 text-[#57F287] border-[#57F287]/20 hover:bg-[#57F287]/30"
+                                                            : "bg-white/5 text-[#949ba4] border-white/10"
                                                     }
                                                 >
                                                     {campaign.isActive ? "Active" : "Inactive"}
@@ -588,14 +631,14 @@ export default async function MerchantPage() {
                                             </TableCell>
                                         </TableRow>
                                     ))}
-                                    {merchant.merchantCampaigns.length === 0 && (
+                                    {merchantCampaigns.length === 0 && (
                                         <TableRow>
                                             <TableCell
                                                 colSpan={6}
-                                                className="text-center py-12 text-zinc-500 bg-zinc-50/30"
+                                                className="text-center py-12 text-[#949ba4]"
                                             >
                                                 <div className="flex flex-col items-center gap-2">
-                                                    <Megaphone className="h-8 w-8 text-zinc-300" />
+                                                    <Megaphone className="h-8 w-8 text-[#949ba4]/30" />
                                                     <p>
                                                         No campaigns found. Create one above to get started!
                                                     </p>
@@ -611,47 +654,47 @@ export default async function MerchantPage() {
 
                 {/* ── Tracking Scripts ───────────────────────────────── */}
                 <TabsContent value="tracking" className="space-y-6 pt-6">
-                    <Card className="border-zinc-200 shadow-sm">
-                        <CardHeader className="bg-zinc-50/50 border-b border-zinc-100">
-                            <CardTitle className="flex items-center gap-2">
-                                <Code className="h-5 w-5 text-zinc-500" /> PPS Tracking Scripts
+                    <Card className="bg-[#232428] border-white/5">
+                        <CardHeader className="border-b border-white/5">
+                            <CardTitle className="flex items-center gap-2 text-white">
+                                <Code className="h-5 w-5 text-[#5865F2]" /> PPS Tracking Scripts
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="pt-6 space-y-6">
-                            <p className="text-sm text-zinc-600">
+                            <p className="text-sm text-[#949ba4]">
                                 For Pay-Per-Sale campaigns, copy the tracking script below and
-                                paste it on your "Thank You" or order confirmation
+                                paste it on your &quot;Thank You&quot; or order confirmation
                                 page. This script will automatically report conversions to
                                 ClickStream.
                             </p>
 
-                            {merchant.merchantCampaigns.filter((c) => c.type === "PPS")
+                            {merchantCampaigns.filter((c) => c.type === "PPS")
                                 .length > 0 ? (
-                                merchant.merchantCampaigns
+                                merchantCampaigns
                                     .filter((c) => c.type === "PPS")
                                     .map((campaign) => (
                                         <div key={campaign.id} className="space-y-3">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h4 className="font-semibold text-zinc-900">
+                                                    <h4 className="font-semibold text-white">
                                                         {safeGetHostname(campaign.targetUrl)}
                                                     </h4>
-                                                    <p className="text-xs text-zinc-500 truncate max-w-md">
+                                                    <p className="text-xs text-[#949ba4] truncate max-w-md">
                                                         {campaign.targetUrl}
                                                     </p>
                                                 </div>
                                                 <Badge
                                                     variant="outline"
-                                                    className="bg-emerald-50 text-emerald-700 border-emerald-200"
+                                                    className="bg-[#57F287]/10 text-[#57F287] border-[#57F287]/20"
                                                 >
                                                     {campaign.reward}% Commission
                                                 </Badge>
                                             </div>
                                             <div className="relative">
-                                                <pre className="bg-zinc-900 text-zinc-100 p-4 rounded-lg text-xs overflow-x-auto">
+                                                <pre className="bg-[#1a1b1e] text-[#00f0ff] p-4 rounded-lg text-xs overflow-x-auto border border-white/5 font-mono">
                                                     <code
                                                         dangerouslySetInnerHTML={{
-                                                            __html: `<script>
+                                                            __html: `&lt;script&gt;
   (function() {
     // Read the cs_ref cookie set by ClickStream redirect
     const cookieMatch = document.cookie.match(/cs_ref=([^;]+)/);
@@ -667,18 +710,18 @@ export default async function MerchantPage() {
       });
     }
   })();
-</script>`,
+&lt;/script&gt;`,
                                                         }}
                                                     />
                                                 </pre>
                                             </div>
-                                            <p className="text-xs text-zinc-500">
+                                            <p className="text-xs text-[#949ba4]">
                                                 Replace{" "}
-                                                <code className="bg-zinc-100 px-1 rounded">
+                                                <code className="bg-[#1a1b1e] px-1 rounded border border-white/5 text-[#00f0ff]">
                                                     ORDER_ID_HERE
                                                 </code>{" "}
                                                 and{" "}
-                                                <code className="bg-zinc-100 px-1 rounded">
+                                                <code className="bg-[#1a1b1e] px-1 rounded border border-white/5 text-[#00f0ff]">
                                                     ORDER_TOTAL_HERE
                                                 </code>{" "}
                                                 with your dynamic order values.
@@ -686,8 +729,8 @@ export default async function MerchantPage() {
                                         </div>
                                     ))
                             ) : (
-                                <div className="text-center py-8 text-zinc-500">
-                                    <Code className="h-8 w-8 text-zinc-300 mx-auto mb-2" />
+                                <div className="text-center py-8 text-[#949ba4]">
+                                    <Code className="h-8 w-8 text-[#949ba4]/30 mx-auto mb-2" />
                                     <p>
                                         No PPS campaigns found. Create a PPS campaign to get your
                                         tracking script.
@@ -700,25 +743,25 @@ export default async function MerchantPage() {
 
                 {/* ── Transaction History ────────────────────────────── */}
                 <TabsContent value="transactions" className="space-y-6 pt-6">
-                    <Card className="border-zinc-200 shadow-sm overflow-hidden">
-                        <CardHeader className="bg-zinc-50/50 border-b border-zinc-100">
-                            <CardTitle className="flex items-center gap-2">
-                                <DollarSign className="h-5 w-5 text-zinc-500" /> Transaction
+                    <Card className="bg-[#232428] border-white/5 overflow-hidden">
+                        <CardHeader className="border-b border-white/5">
+                            <CardTitle className="flex items-center gap-2 text-white">
+                                <DollarSign className="h-5 w-5 text-[#5865F2]" /> Transaction
                                 Ledger
                             </CardTitle>
-                            <CardDescription>
+                            <CardDescription className="text-[#949ba4]">
                                 All financial transactions for your account
                             </CardDescription>
                         </CardHeader>
                         <CardContent className="p-0">
                             <Table>
-                                <TableHeader className="bg-zinc-50/50">
-                                    <TableRow>
-                                        <TableHead>Date</TableHead>
-                                        <TableHead>Type</TableHead>
-                                        <TableHead>Description</TableHead>
-                                        <TableHead>Amount</TableHead>
-                                        <TableHead className="text-right pr-6">Direction</TableHead>
+                                <TableHeader>
+                                    <TableRow className="border-white/5 hover:bg-transparent">
+                                        <TableHead className="text-[#949ba4]">Date</TableHead>
+                                        <TableHead className="text-[#949ba4]">Type</TableHead>
+                                        <TableHead className="text-[#949ba4]">Description</TableHead>
+                                        <TableHead className="text-[#949ba4]">Amount</TableHead>
+                                        <TableHead className="text-right pr-6 text-[#949ba4]">Direction</TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
@@ -729,9 +772,9 @@ export default async function MerchantPage() {
                                         return (
                                             <TableRow
                                                 key={tx.id}
-                                                className="hover:bg-zinc-50/50"
+                                                className="border-white/5 hover:bg-white/5"
                                             >
-                                                <TableCell className="text-sm text-zinc-600">
+                                                <TableCell className="text-sm text-[#949ba4]">
                                                     {tx.createdAt.toLocaleDateString()}
                                                 </TableCell>
                                                 <TableCell>
@@ -739,30 +782,30 @@ export default async function MerchantPage() {
                                                         variant="outline"
                                                         className={
                                                             tx.type === "DEPOSIT"
-                                                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                                                ? "bg-[#57F287]/10 text-[#57F287] border-[#57F287]/20"
                                                                 : tx.type === "PPC_CLICK"
-                                                                    ? "bg-blue-50 text-blue-700 border-blue-200"
-                                                                    : "bg-purple-50 text-purple-700 border-purple-200"
+                                                                    ? "bg-[#5865F2]/10 text-[#5865F2] border-[#5865F2]/20"
+                                                                    : "bg-[#bd00ff]/10 text-[#bd00ff] border-[#bd00ff]/20"
                                                         }
                                                     >
                                                         {tx.type}
                                                     </Badge>
                                                 </TableCell>
-                                                <TableCell className="text-sm text-zinc-600 max-w-xs truncate">
+                                                <TableCell className="text-sm text-[#949ba4] max-w-xs truncate">
                                                     {tx.description || tx.referenceId}
                                                 </TableCell>
                                                 <TableCell
-                                                    className={`font-semibold ${isOutgoing ? "text-red-600" : "text-emerald-600"}`}
+                                                    className={`font-semibold ${isOutgoing ? "text-red-400" : "text-[#57F287]"}`}
                                                 >
                                                     {isOutgoing ? "-" : "+"}${tx.amount.toFixed(2)}
                                                 </TableCell>
                                                 <TableCell className="text-right pr-6">
                                                     {isDeposit ? (
-                                                        <ArrowDownLeft className="h-4 w-4 text-emerald-600 inline" />
+                                                        <ArrowDownLeft className="h-4 w-4 text-[#57F287] inline" />
                                                     ) : isOutgoing ? (
-                                                        <ArrowUpRight className="h-4 w-4 text-red-600 inline" />
+                                                        <ArrowUpRight className="h-4 w-4 text-red-400 inline" />
                                                     ) : (
-                                                        <ArrowDownLeft className="h-4 w-4 text-emerald-600 inline" />
+                                                        <ArrowDownLeft className="h-4 w-4 text-[#57F287] inline" />
                                                     )}
                                                 </TableCell>
                                             </TableRow>
@@ -772,7 +815,7 @@ export default async function MerchantPage() {
                                         <TableRow>
                                             <TableCell
                                                 colSpan={5}
-                                                className="text-center py-12 text-zinc-500"
+                                                className="text-center py-12 text-[#949ba4]"
                                             >
                                                 No transactions yet. Deposit funds to get started.
                                             </TableCell>
